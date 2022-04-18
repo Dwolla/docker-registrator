@@ -1,0 +1,93 @@
+name: Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  DOCKER_LOCAL_TAG: dwolla/registrator:local
+
+jobs:
+  build:
+    name: Build, test, and publish images
+    runs-on: ${{ matrix.os }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [windows-2019, windows-2022]
+        include:
+        - os: windows-2019
+          dockerfile: windows/nanoserver-1809/Dockerfile
+          tag_suffix: nanoserver-1809-amd64
+          context: windows
+        - os: windows-2022
+          dockerfile: windows/nanoserver-ltsc2022/Dockerfile
+          tag_suffix: nanoserver-ltsc2022-amd64
+          context: windows
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Cache Docker layers
+        uses: actions/cache@v2
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-buildx-
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and export to Docker
+        uses: docker/build-push-action@v2
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ env.DOCKER_LOCAL_TAG }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache
+
+      - name: Get versions
+        id: get-versions
+        run: |
+          $rawOsVersion = docker run --rm --entrypoint "cmd.exe" ${{ env.DOCKER_LOCAL_TAG }} /c ver  | Select -Skip 1 | Select -First 1
+          $rawOsVersion -match '.*\[Version (?<version>\d+\.\d+\.\d+\.\d+)\]'
+          $osVersion = $Matches.version
+          $version = docker run --rm ${{ env.DOCKER_LOCAL_TAG }} --version
+          Write-Output "::set-output name=os-version::${os_version}"
+          Write-Output "::set-output name=git-tag::${version}"
+          Write-Output "::set-output name=docker-tag::$($version.substring(1))"
+
+      - name: Build and push
+        uses: docker/build-push-action@v2
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.get-versions.outputs.docker-tag }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache
+
+      - name: Create tag
+        uses: actions/github-script@v5
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/${{ steps.get-versions.outputs.git-tag }}',
+              sha: context.sha
+            })
