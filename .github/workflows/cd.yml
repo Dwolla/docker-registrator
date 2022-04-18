@@ -1,0 +1,65 @@
+name: Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build, test, and publish images
+    runs-on: ${{ matrix.os }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [windows-2019, windows-2022]
+        include:
+        - os: windows-2019
+          dockerfile: windows/nanoserver-1809/Dockerfile
+          tag_suffix: nanoserver-1809-amd64
+          context: windows
+        - os: windows-2022
+          dockerfile: windows/nanoserver-ltsc2022/Dockerfile
+          tag_suffix: nanoserver-ltsc2022-amd64
+          context: windows
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Build Docker image
+        id: build_docker_image
+        run: |
+          docker build -f ${{ matrix.dockerfile }} -t registrator ${{ matrix.context }}
+          $rawOsVersion = docker run --rm --entrypoint "cmd.exe" registrator /c ver  | Select -Skip 1 | Select -First 1
+          $rawOsVersion -match '.*\[Version (?<version>\d+\.\d+\.\d+\.\d+)\]'
+          $osVersion = $Matches.version
+          echo $osVersion
+          docker run --rm registrator --version *>&1
+          $version = docker run --rm registrator --version
+          echo "::set-output name=os-version::${os_version}"
+          echo "::set-output name=git-tag::${version}"
+          echo "::set-output name=docker-tag::$($version.substring(1))"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish Docker image
+        run: |
+          docker tag registrator ${{ steps.build_docker_image.outputs.docker_tag }}
+          docker push ${{ steps.build_docker_image.outputs.docker_tag }}
+
+      - name: Create tag
+        uses: actions/github-script@v5
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/${{ steps.build_docker_image.outputs.git_tag }}',
+              sha: context.sha
+            })
